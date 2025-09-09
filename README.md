@@ -2,6 +2,7 @@
 ## Steps to run:
   - ```npm install ```
   - ```npm run dev ```
+  - Run both client and server side applications and open url `http://localhost:5173/` in the browser
 
 
 ## Approach
