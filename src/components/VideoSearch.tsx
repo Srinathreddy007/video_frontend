@@ -16,8 +16,17 @@ export default function VideoSearch({ video }: Props) {
   const [segmentEnd, setSegmentEnd] = useState<number | null>(null);
   const [metaDuration, setMetaDuration] = useState<number | null>(null);
   const [seekableEnd, setSeekableEnd] = useState<number | null>(null);
+  const [srcUrl, setSrcUrl] = useState<string>(() => toAbsoluteMedia(video.file));
+  const [usingBlob, setUsingBlob] = useState<boolean>(false);
 
-  // Pause automatically when reaching the suggested end time
+  useEffect(() => {
+    setSrcUrl(toAbsoluteMedia(video.file));
+    setUsingBlob(false);
+    setMetaDuration(null);
+    setSeekableEnd(null);
+    setSegmentEnd(null);
+  }, [video.file]);
+
   useEffect(() => {
     const el = videoRef.current;
     if (!el) return;
@@ -47,16 +56,82 @@ export default function VideoSearch({ video }: Props) {
     };
   }, [segmentEnd]);
 
-  function normalizeHit(r: SearchHit): { start: number; end: number } {
-    const rawStart = r.start ?? 0;
-    const rawEnd = r.end ?? rawStart;
-    const d = metaDuration ?? videoRef.current?.duration ?? null;
+  useEffect(() => {
+    const libDur = video.duration_seconds;
+    if (usingBlob) return; // already swapped
+    if (!libDur || !Number.isFinite(libDur)) return;
+    if (metaDuration == null) return; // wait for metadata
 
-    // Heuristic: if values look like milliseconds, convert once.
+    const looksWrong = metaDuration < libDur - 0.75; // 750ms tolerance
+    if (!looksWrong) return;
+
+    let aborted = false;
+    (async () => {
+      try {
+        const resp = await fetch(toAbsoluteMedia(video.file));
+        if (!resp.ok) return;
+        const blob = await resp.blob();
+        if (aborted) return;
+        const url = URL.createObjectURL(blob);
+        // Revoke previous blob url if any
+        if (usingBlob) {
+          URL.revokeObjectURL(srcUrl);
+        }
+        setSrcUrl(url);
+        setUsingBlob(true);
+      } catch (_) {
+      }
+    })();
+
+    return () => {
+      aborted = true;
+    };
+  }, [metaDuration, video.duration_seconds, video.file, usingBlob, srcUrl]);
+
+  // Parse seconds from number, numeric string, "12.3s", or "hh:mm:ss(.ms)"/"mm:ss(.ms)"
+  function parseTimeLike(v: any): number | null {
+    if (v == null) return null;
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
+    const s = String(v).trim();
+    if (!s) return null;
+    // 12.3 or 12.3s
+    if (/^\d+(?:\.\d+)?s?$/.test(s)) {
+      const num = parseFloat(s.replace(/s$/, ''));
+      return Number.isFinite(num) ? num : null;
+    }
+    const m = s.match(/^(?:(\d+):)?(\d{1,2}):(\d{1,2}(?:\.\d+)?)$/);
+    if (m) {
+      const hh = m[1] ? parseInt(m[1], 10) : 0;
+      const mm = parseInt(m[2], 10);
+      const ss = parseFloat(m[3]);
+      if ([hh, mm, ss].every(Number.isFinite)) return hh * 3600 + mm * 60 + ss;
+    }
+    const num = parseFloat(s);
+    return Number.isFinite(num) ? num : null;
+  }
+
+  function normalizeHit(r: SearchHit | Record<string, any>): { start: number; end: number } {
+    const pick = (obj: any, keys: string[], fallback: number) => {
+      for (const k of keys) {
+        const v = obj?.[k];
+        const n = parseTimeLike(v);
+        if (n != null && Number.isFinite(n)) return n;
+      }
+      return fallback;
+    };
+    const rawStart = pick(r as any, [
+      'start', 'start_time', 'startTime', 'start_timestamp', 'start_ts', 'ts_start', 'startSec', 'start_seconds'
+    ], 0);
+    const rawEnd = pick(r as any, [
+      'end', 'end_time', 'endTime', 'end_timestamp', 'end_ts', 'ts_end', 'endSec', 'end_seconds'
+    ], rawStart);
+
+    const libDur = Number.isFinite(video.duration_seconds) ? video.duration_seconds : null;
+    const d = libDur ?? (metaDuration ?? videoRef.current?.duration ?? null);
+
     const looksLikeMs = (v: number, dur: number | null) => {
       if (!Number.isFinite(v)) return false;
       if (dur && v > dur * 1.5 && v / 1000 <= dur * 1.5) return true;
-      // Also treat very large values as ms if <= 10h when divided
       return v > 600 && v / 1000 < 36000;
     };
 
@@ -78,6 +153,20 @@ export default function VideoSearch({ video }: Props) {
     }
     if (!Number.isFinite(end) || end < start) end = start;
     return { start, end };
+  }
+
+  async function seekAndMaybePlay(start: number, end?: number) {
+    const el = videoRef.current;
+    if (!el) return;
+    const ensureMeta = () => new Promise<void>((resolve) => {
+      if (el.readyState >= 1 && Number.isFinite(el.duration)) return resolve();
+      const onMeta = () => { el.removeEventListener('loadedmetadata', onMeta); resolve(); };
+      el.addEventListener('loadedmetadata', onMeta);
+    });
+    await ensureMeta();
+    el.currentTime = Math.max(0, start);
+    if (Number.isFinite(end ?? NaN)) setSegmentEnd(end!);
+    el.play().catch(() => {});
   }
 
   function formatDuration(totalSeconds: number | null | undefined) {
@@ -106,14 +195,12 @@ export default function VideoSearch({ video }: Props) {
     try {
       setBusy(true);
       if (!transcribed) await ensureTranscribed();
-      const data = await searchVideo(video.id, q.trim(), true, 3);
-      setResults(data.results || []);
+      const data = await searchVideo(video.id, q.trim(), true, 1);
+      setResults((data.results || []).slice(0, 1));
       if (data.results?.length && videoRef.current) {
         const top = data.results[0];
         const { start, end } = normalizeHit(top);
-        videoRef.current.currentTime = start;
-        setSegmentEnd(Number.isFinite(end) ? end : null);
-        videoRef.current.play().catch(() => {});
+        await seekAndMaybePlay(start, end);
       }
     } catch (err: any) {
       setError(err.message || "Search failed");
@@ -126,9 +213,9 @@ export default function VideoSearch({ video }: Props) {
     <div className="card">
       <h3>{video.title}</h3>
       <video
-        key={video.file}
+        key={srcUrl}
         ref={videoRef}
-        src={toAbsoluteMedia(video.file)}
+        src={srcUrl}
         controls
         preload="metadata"
         crossOrigin="anonymous"
@@ -144,7 +231,7 @@ export default function VideoSearch({ video }: Props) {
         <button disabled={busy}>{busy ? "Searching…" : "Search"}</button>
       </form>
       <small>
-        Duration: {metaDuration ? `${metaDuration.toFixed(2)}s` : '…'}
+        Duration: {metaDuration ? `${metaDuration.toFixed(2)}s` : '…'} · Source: {usingBlob ? 'blob' : 'remote'}
         {seekableEnd != null && (
           <> · Seekable: {seekableEnd.toFixed(2)}s</>
         )}
@@ -159,25 +246,20 @@ export default function VideoSearch({ video }: Props) {
             <div className="hit" key={i}>
               <div className="hit-meta">
                 <button
-                  onClick={() => {
-                    if (videoRef.current) {
-                      const { start } = normalizeHit(r);
-                      videoRef.current.currentTime = start;
-                      setSegmentEnd(null);
-                      videoRef.current.play().catch(() => {});
-                    }
+                  onClick={async () => {
+                    if (!videoRef.current) return;
+                    const { start } = normalizeHit(r);
+                    setSegmentEnd(null);
+                    await seekAndMaybePlay(start);
                   }}
                 >
                   {(() => { const { start } = normalizeHit(r); return `Jump to ${start.toFixed(2)}s`; })()}
                 </button>
                 <button
-                  onClick={() => {
-                    if (videoRef.current) {
-                      const { start, end } = normalizeHit(r);
-                      videoRef.current.currentTime = start;
-                      setSegmentEnd(Number.isFinite(end) ? end : null);
-                      videoRef.current.play().catch(() => {});
-                    }
+                  onClick={async () => {
+                    if (!videoRef.current) return;
+                    const { start, end } = normalizeHit(r);
+                    await seekAndMaybePlay(start, end);
                   }}
                 >
                   {(() => { const { start, end } = normalizeHit(r); return `Play ${start.toFixed(2)}s → ${end.toFixed(2)}s`; })()}
