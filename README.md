@@ -24,3 +24,9 @@ The frontend is built with **React + Vite** for a fast developer experience. It 
 - Chose **Vite** for faster hot reload and smaller bundle size.  
 - Used plain **CSS** instead of a UI library to keep the project lean. 
 
+## Demo Pictures
+<img width="1151" height="515" alt="Pasted Graphic 1" src="https://github.com/user-attachments/assets/1538aa94-a916-473d-9f6f-6728d6677a57" />
+<img width="1252" height="684" alt="Pasted Graphic 2" src="https://github.com/user-attachments/assets/e28bf167-8936-4f94-a6d3-4d59f60fd00a" />
+<img width="1234" height="753" alt="Pasted Graphic 3" src="https://github.com/user-attachments/assets/ad4d5e53-a1f4-41cb-99f6-aa5366857cb4" />
+
+
