@@ -1,5 +1,5 @@
 import { useState, useRef } from 'react';
-import { upload_video } from '../api';
+import { upload_video, transcribe } from '../api';
 
 type Props = {
   onUploaded: () => void;
@@ -52,7 +52,13 @@ export default function UploadForm({ onUploaded }: Props) {
 
     try {
       setBusy(true);
-      await upload_video(title.trim(), f);
+      const v = await upload_video(title.trim(), f);
+      // Kick off transcription and wait; surface any error
+      try {
+        await transcribe(v.id);
+      } catch (e: any) {
+        setError(e?.message || 'Failed to start transcription');
+      }
       setTitle('');
       if (file.current) file.current.value = '';
       onUploaded();
